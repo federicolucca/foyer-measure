@@ -31,10 +31,7 @@ from sklearn.pipeline import FeatureUnion, Pipeline
 import systemone_email as so
 import online_backends as ob
 
-CLASSI = {
-    "tipo": list(so.TIPI),
-    "urgenza": so.URGENZA_LABEL,
-}
+CLASSI = {c: ([True, False] if c in so.BOOLEANI else list(so.CRITERI[c])) for c in so.CAMPI}
 
 
 def testo(state: dict) -> str:
@@ -64,18 +61,13 @@ def baseline(train: list[dict], test: list[dict], campo: str) -> tuple[list[str]
     return pred, s_train, s_pred
 
 
-def systemone(test: list[dict], campo: str, modello: str) -> tuple[list[str], list[float], float]:
+def systemone(test: list[dict], campo: str, modello: str, formato: str = "choice") -> tuple[list, list[float], float]:
+    """Modello decisionale locale (Ollama), con la domanda del paper per il campo."""
     pred, tempi = [], []
     for r in test:
         t = time.time()
-        if campo == "tipo":
-            a = so.ask(so.snapshot(r["state"]), "tipo", {"type": "choice", "instructions": "What kind of email is this?", "criteria": so.TIPI}, modello)
-            pred.append(a["choice"])
-        elif campo == "urgenza":
-            a = so.ask(so.snapshot(r["state"]), "urgenza", {"type": "score", "instructions": "How urgent is this email for the recipient?", "criteria": so.URGENZA}, modello)
-            pred.append(so.URGENZA_LABEL[round(a["score"])])
-        else:
-            raise SystemExit(f"campo {campo} non supportato per systemone")
+        a = so.ask(so.stato(r["state"]), campo, so.domanda(campo, formato), modello)
+        pred.append(so.etichetta(campo, a))
         tempi.append(time.time() - t)
     return pred, tempi, sum(tempi)
 
@@ -100,6 +92,7 @@ def main():
     ap.add_argument("--online", choices=list(ob.BACKENDS), default=None, help="aggiunge un sistema online (serve la chiave in env)")
     ap.add_argument("--test-split", default="test", help="test | val | test,val")
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--formato", choices=["choice", "noul"], default="choice", help="formato dei booleani per i modelli decisionali")
     a = ap.parse_args()
 
     rows = carica(a.jsonl)
@@ -132,7 +125,7 @@ def main():
 
     # B) modello decisionale
     if not a.no_systemone:
-        pred_b, tempi, tot = systemone(test, campo, a.modello)
+        pred_b, tempi, tot = systemone(test, campo, a.modello, a.formato)
         rb = valuta(f"systemone:{a.modello}", y, pred_b, classi)
         rb["tempi_s"] = {"predizione_totale": round(tot, 2), "per_email_s": round(tot / len(test), 2),
                          "min_s": round(min(tempi), 2), "max_s": round(max(tempi), 2)}
@@ -149,7 +142,7 @@ def main():
         for r in test:
             t = time.time()
             try:
-                lab, _ = ob.classify(a.online, so.snapshot(r["state"]), campo, a.modello)
+                lab, _ = ob.classify(a.online, so.stato(r["state"]), campo, a.modello, a.formato)
             except Exception as e:
                 lab, errori = classi[0], errori + 1   # fallback alla prima classe, contato
                 print(f"  online errore su id={r.get('id')}: {str(e)[:90]}")

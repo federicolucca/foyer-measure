@@ -2,7 +2,7 @@
 
 Code and protocol accompanying the preprint
 
-> F. Lucca, *Measure Before You Train: Typed Decision Models vs. a Classical Baseline vs. a Generative LLM for Routing a Personal Multilingual Inbox*, arXiv, October 2026.
+> F. Lucca, *Measure Before You Train: Typed Decision Models vs. a Classical Baseline vs. a Generative LLM for Routing a Personal Multilingual Inbox*, arXiv:2610.32955, v2, October 2026.
 
 The paper measures how well different systems — production keyword rules, a TF-IDF + logistic-regression baseline, local and hosted typed decision models (Tev1, Nimble, Jev) and hosted generative LLMs — make the routing decisions of a personal email agent: message type, urgency, and three switches (needs-reply, action-48h, is-noise). This repository contains everything needed to run the same measurement on **your own** inbox. **No emails, labels or per-email results are included: the data in the paper are the author's private correspondence and are not released.**
 
@@ -10,10 +10,15 @@ The paper measures how well different systems — production keyword rules, a TF
 
 | File | Purpose |
 |---|---|
-| `systemone_email.py` | Client for the typed-decision endpoint (`/v1/systemone`, Ollama ≥ 0.35 or a hosted server): one typed question per call, automatic reload on server errors, the exact questions and class definitions used in the paper (Italian, with English glosses in the paper's Appendix B). |
-| `bench_email.py` | The benchmark: TF-IDF + logistic regression (out-of-fold), a local decision model, the production prediction and optional online systems, all on the same labelled JSONL, same splits, same metrics (accuracy, macro-F1, latency). Writes `<field>.risultati.json`. |
-| `online_backends.py` | Backends for hosted systems: TypeSafe Jev, any System One server (Nimble, Clef, Ollama cloud), generative LLMs through OpenRouter in JSON mode. Keys are read from environment variables only. |
+| `systemone_email.py` | The questions, class definitions and body cleaning used in the paper (Appendix B, Italian, verbatim): type (6 classes) and urgency (3 levels) as `choice`, the three switches as `choice` yes/no with one definition per option (`noul` available for the format comparison), project as `choice` with descriptions of at most 120 characters. Client for a local `/v1/systemone` (Ollama ≥ 0.35): one question per call, reload after server errors. |
+| `online_backends.py` | The same questions for hosted systems: TypeSafe Jev, Bespoke Nimble, any System One server, generative LLMs through OpenRouter in JSON mode (the Italian prompt of Appendix B.4). Keys from environment variables only. |
+| `bench_email.py` | TF-IDF + logistic regression, a local decision model, the production prediction and an optional online system on the same labelled JSONL, same splits, same metrics; all five fields. |
+| `decision_bench.py` | *(v2)* An online system on all five fields, one question per call, in parallel and resumable; raw answers to a JSONL. `repeat` re-asks a random subset to measure determinism. |
+| `metrics.py` | *(v2)* From raw answers to results: accuracy with bootstrap 95% intervals, macro-F1, majority class, median and p95 latency, API errors, token cost, mean confidence on correct vs. wrong answers, ECE (10 bins), per-email agreement and exact McNemar against a second system, determinism. |
+| `cost_threshold.py` | *(v2)* The is-noise threshold chosen for a written cost (missed email × 10 + email handled needlessly × 1) inside thread-grouped cross-validation, with the same rule for the baseline (inner CV) and for zero-shot systems (their own probabilities). |
+| `project_bench.py` | *(v2)* Project assignment with one owner-written description per project (≤ 120 characters) against names only. The descriptions file stays private. |
 | `kappa.py` | Cohen's κ with bootstrap intervals, confusion matrices and disagreement lists, for a second annotator's CSV against a reference. No dependencies. |
+| `kappa_multi.py` | *(v2)* One or two blind annotators: κ against the reference, κ between them and Fleiss' κ for three raters, with bootstrap intervals. No dependencies. |
 | `INSTRUCTIONS_annotator.md` / `ISTRUZIONI_annotatore.md` | The labelling instructions given to annotators (English / Italian), with the label definitions. |
 
 ## The protocol in one page
@@ -21,10 +26,10 @@ The paper measures how well different systems — production keyword rules, a TF
 1. **Sample** from the production database, stratified by the field you want to measure (120–250 emails per round is enough to start).
 2. **Freeze a snapshot** of exactly what the model will see (sender, subject, body truncated to 1,500 characters, date) and **redact secrets** before storing it (passwords, tokens, account numbers).
 3. **Split by thread**, not by email id: a reply is a near-duplicate of its parent. Keep the fixed split for later; use thread-grouped cross-validation while the test split is small.
-4. **Label by hand** in the agent's own review loop: a model proposal, then a human confirms or corrects. Record which was proposed and which was kept.
+4. **Label by hand** in the agent's own review loop: a model proposal, then a human confirms or corrects. Record which was proposed and which was kept. Give a sample to a **blind second annotator** (sender, subject, date, body only) and report κ.
 5. **Pre-register** the hypotheses of each new round before opening its labels (we commit a file with thresholds and a verification script).
-6. **Count before training**: majority class, the production system, a trained baseline, and the zero-shot systems — on the same rows, under the same protocol.
-7. **Compose the labels into actions** (draft / task / ignore / nothing) and count the costly error — an email that needed action and was ignored — not just accuracy. Write down the price of each error; choose thresholds for it.
+6. **Count before training**: majority class, the production system, a trained baseline, and the zero-shot systems — on the same rows, under the same protocol and the **same question format**.
+7. **Compose the labels into actions** (draft / task / ignore / nothing) and count the costly error — an email that needed action and was ignored — not just accuracy. Write down the price of each error; choose thresholds for it, **for every system that returns probabilities, not only for the trained one**.
 
 ## Input format
 
@@ -38,20 +43,35 @@ One JSON object per line:
  "predicted": {"tipo": "...", "urgenza": "..."}}
 ```
 
-Label vocabularies (Italian in the data, as shown to the models; English in the paper): `tipo` ∈ {richiesta, aggiornamento, offerta, newsletter, spam, altro}; `urgenza` ∈ {alta, media, bassa}; `relazione` ∈ {cliente, fornitore, socio, famiglia, istituzione, servizio, monitoraggio, me}.
+Label vocabularies (Italian in the data, as shown to the models; English in the paper): `tipo` ∈ {richiesta, aggiornamento, offerta, newsletter, spam, altro}; `urgenza` ∈ {alta, media, bassa}; `relazione` ∈ {cliente, fornitore, socio, famiglia, istituzione, servizio, monitoraggio, me}. The descriptions file for `project_bench.py` is a Markdown table `| slug | descrizione |`, with an optional `nessuno` row.
 
 ## Running
 
 ```bash
-pip install scikit-learn
+pip install scikit-learn numpy
 ollama pull tev1:0.8b          # or tev1 (4B), nimble (9B)
 python bench_email.py labels.jsonl --campo tipo --modello tev1:0.8b
 python bench_email.py labels.jsonl --campo urgenza --online openrouter --modello google/gemma-4-26b-a4b-it   # OPENROUTER_API_KEY
-python bench_email.py labels.jsonl --campo tipo --online jev                                                 # TYPESAFE_API_KEY
-python kappa.py annotator.csv reference.json
+
+# v2: a hosted decision model on all fields, then the metrics
+python decision_bench.py run labels.jsonl raw_jev.jsonl --backend jev                                        # TYPESAFE_API_KEY
+python decision_bench.py repeat labels.jsonl raw_jev.jsonl --backend jev --n 100
+python decision_bench.py run labels.jsonl raw_nimble.jsonl --backend nimble                                  # BESPOKE_API_KEY
+python metrics.py labels.jsonl raw_jev.jsonl results_jev.json --prezzo-input 0.042 --ripetizione raw_jev.jsonl --confronto raw_nimble.jsonl
+
+# v2: same switches in the other format, cost threshold for everyone, projects, annotators
+python decision_bench.py run labels.jsonl raw_jev_noul.jsonl --backend jev --formato noul --campi serve_risposta,azione_48h,e_rumore
+python cost_threshold.py labels.jsonl results_threshold.json --sistema jev=raw_jev.jsonl --sistema nimble=raw_nimble.jsonl
+python project_bench.py labels.jsonl descriptions.md results_project.json --backend nimble --variante desc
+python kappa_multi.py reference.json results_kappa.json annotator1.csv annotator2.csv
 ```
 
-Two practical notes from the paper: the System One endpoint silently fails when option descriptions are long (keep each `criteria` value under ~120 characters), and run one request at a time on CPU (`OLLAMA_NUM_PARALLEL=1`).
+Practical notes from the paper:
+- **Short option descriptions:** the System One endpoint silently fails when option descriptions are long. Keep each `criteria` value under ~120 characters; 19 options are fine.
+- **One request at a time on CPU:** set `OLLAMA_NUM_PARALLEL=1`.
+- **Question format:** it is part of the measurement. In the paper, Jev's is-noise accuracy moves by 11 points between `noul` and `choice`, while Nimble's does not move. Compare systems in the same format.
+- **Hosted models are not deterministic:** some hosted endpoints return the same label but different probabilities on a repeated request. Use `repeat`.
+- **Small differences on re-runs:** re-running the baseline in another environment (scikit-learn version, snapshot of the text) can change a handful of out-of-fold predictions. On the paper's data, 5 of 231 is-noise predictions differed.
 
 ## Licence
 

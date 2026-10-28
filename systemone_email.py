@@ -1,60 +1,115 @@
 """
-systemone_email — classificazione email con un modello decisionale (Jev-style) via Ollama.
+systemone_email — classificazione email con un modello decisionale (Jev-style) via /v1/systemone.
 
-Usa l'endpoint POST /v1/systemone (Ollama >= 0.35) con Tev1 / Nimble / Clef in locale.
-Pensato per sostituire il "LLM pass 1" di classify_emails sulle domande CHIUSE:
-    tipo, urgenza, serve_risposta, azione_48h, e_rumore, progetto (scelta fra quelli esistenti)
-Il modello generativo resta solo per i casi "progetto = nessuno" (nome, descrizione, task).
+Domande, definizioni e pulizia del corpo sono quelle del paper (Appendice B, v2): le stesse date a tutti i sistemi.
+  - tipo (6 classi) e urgenza (3 livelli) come `choice`;
+  - i tre interruttori (serve_risposta, azione_48h, e_rumore) come `choice` sì/no con una definizione per opzione;
+    `noul` è disponibile per il confronto di formato (nel paper: Jev è sensibile al formato, Nimble no);
+  - progetto come `choice` fra i progetti esistenti + «nessuno», con una descrizione di al massimo 120 caratteri.
+Stato = {mittente, oggetto, corpo}: corpo senza blocchi style/script, tag e URL, spazi compattati, 1500 caratteri.
 
-Lezioni dai test del 20/10/2026 (Ollama 0.40.6, tev1:0.8b, CPU 1 core, 3 GB):
-- Una richiesta con >= 3 domande fallisce con "the model could not evaluate the decision";
-  con 1-2 domande funziona. Quindi: una domanda per chiamata (lo stato viene ricalcolato, ma
-  su GPU sono ~100 ms a domanda; su CPU 1-3 s).
-- Dopo un errore il modello resta in uno stato sporco: la chiamata successiva fallisce anche se
-  valida. Rimedio: una chiamata con keep_alive=0 (scarica il modello) e poi si riprova.
-- Il primo tentativo a freddo puo' fallire: retry.
+Lezioni pratiche (Ollama 0.40.6 / 0.35+, tev1:0.8b su CPU):
+- Una richiesta con >= 3 domande può fallire con "the model could not evaluate the decision": una domanda per chiamata.
+- Dopo un errore il modello resta in uno stato sporco: una chiamata con keep_alive=0 (scarica il modello), poi si riprova.
 - Tev1 accetta al massimo 24 opzioni per domanda; ogni opzione DEVE avere una descrizione.
-  Con piu' di ~22 progetti si fa una pre-selezione (ultimi aggiornati, o per contatto).
-- Le descrizioni in italiano e gli accenti vanno bene.
+- Descrizioni lunghe fanno fallire in silenzio l'endpoint: tenerle sotto ~120 caratteri.
 
 Uso:
     from systemone_email import classify_email
-    out = classify_email({"sender": ..., "subject": ..., "body": ..., "date": ...},
-                         projects=[{"slug": "acme-site", "name": "...", "description": "..."}, ...])
+    out = classify_email({"sender": ..., "subject": ..., "body": ...},
+                         projects=[{"slug": "infra", "description": "..."}, ...])
 """
 from __future__ import annotations
 
+import html
 import json
+import re
 import time
 import urllib.error
 import urllib.request
 
 OLLAMA_URL = "http://localhost:11434/v1/systemone"
 MODEL = "tev1:0.8b"          # oppure "tev1" (4B) o "nimble" (9B, Q8 ~9.5 GB)
-MAX_OPTIONS = 22             # Tev1: 24 opzioni max, teniamo margine per "nessuno"
-BODY_MAX = 1500              # stesso taglio di EmailLabel.snapshot
+MAX_OPTIONS = 22             # Tev1: 24 opzioni max, teniamo margine per «nessuno»
+BODY_MAX = 1500
+DESC_MAX = 120
 TIMEOUT = 300
 
-TIPI = {
-    "richiesta": "Someone asks the recipient to do something",
-    "aggiornamento": "A status update on ongoing work, no action requested",
-    "offerta": "A commercial offer, quote or proposal",
-    "cliente": "A message from a paying client about their project",
-    "altro": "Anything else from a real person",
-    "spam": "Unsolicited marketing",
-    "newsletter": "Automated newsletter or notification",
+# Appendice B.1–B.2 del paper (verbatim). «cliente» non è più un tipo: è una relazione del mittente.
+CRITERI = {
+    'tipo': {
+        'richiesta': 'chi scrive chiede al destinatario qualcosa, o serve una sua azione o risposta',
+        'aggiornamento': 'informazione, notifica, conferma o esito senza richiesta (codici di sicurezza, avvisi di accesso, prenotazioni, report di stato, thread in copia)',
+        'offerta': 'proposta commerciale mirata al destinatario (preventivo, offerta personale)',
+        'newsletter': 'invio di massa periodico o promozionale da un brand o servizio',
+        'spam': 'commerciale non richiesto da mittente sconosciuto, o phishing',
+        'altro': 'tutto il resto, compresi i messaggi inviati dal destinatario stesso',
+    },
+    'urgenza': {
+        'alta': 'serve un\'azione entro circa 48 ore o c\'è un appuntamento in giornata',
+        'media': 'serve un\'azione o una lettura attenta senza scadenza vicina (avvisi di sicurezza, conferme di orario)',
+        'bassa': 'nessuna azione richiesta',
+    },
+    'serve_risposta': {
+        'sì': 'il destinatario dovrebbe rispondere a questa email: qualcuno aspetta una sua risposta',
+        'no': 'nessuna risposta necessaria (notifica, informazione, invio di massa, messaggio già chiuso)',
+    },
+    'azione_48h': {
+        'sì': 'il destinatario deve fare qualcosa entro circa 48 ore (scadenza, appuntamento, pagamento, verifica)',
+        'no': 'nessuna azione con scadenza nelle prossime 48 ore',
+    },
+    'e_rumore': {
+        'sì': 'rumore: notifica automatica, newsletter, pubblicità o messaggio che si può ignorare',
+        'no': 'merita l\'attenzione del destinatario',
+    },
 }
-URGENZA = ["bassa: no deadline, can wait days", "media: should be handled this week", "alta: needs action today"]
-URGENZA_LABEL = ["bassa", "media", "alta"]
+DOMANDA = {'tipo': 'Che tipo di messaggio è questa email per il suo destinatario?',
+           'urgenza': 'Quanto è urgente agire su questa email?',
+           'serve_risposta': 'Il destinatario deve rispondere a questa email?',
+           'azione_48h': 'Il destinatario deve fare qualcosa per questa email entro 48 ore?',
+           'e_rumore': 'Questa email è rumore che si può ignorare?',
+           'progetto': 'A quale progetto del destinatario appartiene questa email?'}
+CAMPI = ['tipo', 'urgenza', 'serve_risposta', 'azione_48h', 'e_rumore']
+BOOLEANI = ['serve_risposta', 'azione_48h', 'e_rumore']
+NESSUNO = 'nessuno'
+
+# compatibilità con la v1 dell'harness
+TIPI = CRITERI['tipo']
+URGENZA_LABEL = ['bassa', 'media', 'alta']
 
 
 class SystemOneError(RuntimeError):
     pass
 
 
-def _post(body: dict) -> dict:
-    req = urllib.request.Request(OLLAMA_URL, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"})
+def domanda(campo: str, formato: str = 'choice') -> dict:
+    """La domanda del paper per un campo; per i booleani formato 'choice' (sì/no con definizioni) o 'noul'."""
+    if campo in BOOLEANI and formato == 'noul':
+        return {'type': 'noul', 'instructions': DOMANDA[campo]}
+    return {'type': 'choice', 'instructions': DOMANDA[campo], 'criteria': CRITERI[campo]}
+
+
+def etichetta(campo: str, risposta: dict):
+    """Dalla risposta System One all'etichetta: stringa per tipo/urgenza, bool per i booleani."""
+    if 'noul' in risposta:
+        return float(risposta['noul']) >= 0.5
+    return risposta['choice'] == 'sì' if campo in BOOLEANI else risposta['choice']
+
+
+def stato(email: dict) -> dict:
+    """Quello che il modello vede, e nient'altro (Appendice B.3)."""
+    s = email.get('state', email)
+    corpo = html.unescape(re.sub(r'<(style|script)[^>]*>.*?</\1>', ' ', s.get('body', '') or '', flags=re.S | re.I))
+    corpo = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>|https?://\S+', ' ', corpo)).strip()
+    return {'mittente': s.get('sender', ''), 'oggetto': s.get('subject', ''), 'corpo': corpo[:BODY_MAX]}
+
+
+snapshot = stato   # nome della v1
+
+
+def _post(body: dict, url: str = OLLAMA_URL, headers: dict | None = None) -> dict:
+    req = urllib.request.Request(url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                                 headers={"Content-Type": "application/json", **(headers or {})})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.load(r)
 
@@ -69,10 +124,10 @@ def _reset(model: str) -> None:
 
 
 def ask(state: dict | str, name: str, question: dict, model: str = MODEL, tries: int = 3) -> dict:
-    """Una domanda, una chiamata. Ritorna la risposta grezza di Ollama per quella domanda."""
+    """Una domanda, una chiamata (Ollama locale). Ritorna la risposta grezza per quella domanda."""
     body = {"model": model, "state": state, "questions": {name: question}}
     last = None
-    for i in range(tries):
+    for _ in range(tries):
         try:
             return _post(body)["answers"][name]
         except urllib.error.HTTPError as e:
@@ -82,85 +137,48 @@ def ask(state: dict | str, name: str, question: dict, model: str = MODEL, tries:
     raise SystemOneError(f"{name}: {last}")
 
 
-def snapshot(email: dict) -> dict:
-    """Lo stesso 'stato' congelato di dataset_email: quello che il modello vede, e nient'altro."""
-    return {
-        "sender": (email.get("sender") or "")[:255],
-        "subject": (email.get("subject") or "")[:512],
-        "body": (email.get("body") or email.get("context") or "")[:BODY_MAX],
-        "date": email.get("date") or "",
-    }
-
-
-def project_criteria(projects: list[dict]) -> dict:
-    """Progetti esistenti -> opzioni con descrizione (obbligatoria per Tev1), piu' 'nessuno'."""
+def project_criteria(projects: list[dict], descrizioni: bool = True) -> dict:
+    """Progetti esistenti -> opzioni (descrizione troncata a 120 caratteri, o solo il nome) più «nessuno»."""
     crit = {}
     for p in projects[:MAX_OPTIONS]:
-        desc = (p.get("description") or "").strip() or p.get("name", "")
-        crit[p["slug"]] = f"{p.get('name', p['slug'])}: {desc[:160]}"
-    crit["nessuno"] = "None of these projects (a new work relationship, or personal/non-project mail)"
+        desc = (p.get("description") or "").strip()
+        crit[p["slug"]] = desc[:DESC_MAX] if descrizioni and desc else f"l'email riguarda il progetto o l'area «{p.get('name', p['slug'])}»"
+    crit[NESSUNO] = "l'email non riguarda nessuno dei progetti elencati"
     return crit
 
 
-def classify_email(email: dict, projects: list[dict], model: str = MODEL) -> dict:
-    """
-    Sei decisioni per un'email. Ritorna etichette + probabilita' + confidenza + tempi.
-    Chiavi: tipo, urgenza, serve_risposta, azione_48h, e_rumore, progetto, meta.
-    """
-    state = snapshot(email)
-    t0 = time.time()
+def classify_email(email: dict, projects: list[dict] | None = None, model: str = MODEL, formato: str = 'choice') -> dict:
+    """Le decisioni di un'email, una domanda per chiamata: etichetta, risposta grezza e tempo per campo."""
+    st = stato(email)
     out: dict = {"meta": {"model": model, "per_domanda_s": {}}}
-
-    def timed(name, q):
+    t0 = time.time()
+    for campo in CAMPI:
         t = time.time()
-        a = ask(state, name, q, model)
-        out["meta"]["per_domanda_s"][name] = round(time.time() - t, 2)
-        return a
-
-    a = timed("tipo", {"type": "choice", "instructions": "What kind of email is this?", "criteria": TIPI})
-    out["tipo"] = {"label": a["choice"], "p": a["probabilities"], "conf": a["confidence"]}
-
-    a = timed("urgenza", {"type": "score", "instructions": "How urgent is this email for the recipient?", "criteria": URGENZA})
-    out["urgenza"] = {"label": URGENZA_LABEL[round(a["score"])], "score": a["score"], "p": a["probabilities"], "conf": a["confidence"]}
-
-    for name, instr in (
-        ("serve_risposta", "Does this email require a written reply from the recipient?"),
-        ("azione_48h", "Does it require a concrete action by the recipient within 48 hours?"),
-        ("e_rumore", "Is this email noise (automated notification, marketing, irrelevant)?"),
-    ):
-        a = timed(name, {"type": "noul", "instructions": instr})
-        out[name] = {"label": a["noul"] >= 0.5, "p_true": a["noul"]}
-
+        a = ask(st, campo, domanda(campo, formato), model)
+        out["meta"]["per_domanda_s"][campo] = round(time.time() - t, 2)
+        out[campo] = {"label": etichetta(campo, a), "raw": a}
     if projects:
-        a = timed("progetto", {"type": "choice", "instructions": "Which existing work project does this email belong to?",
-                               "criteria": project_criteria(projects)})
-        out["progetto"] = {"label": a["choice"], "p": a["probabilities"], "conf": a["confidence"],
-                           "nuovo": a["choice"] == "nessuno"}
+        q = {"type": "choice", "instructions": DOMANDA['progetto'], "criteria": project_criteria(projects)}
+        a = ask(st, "progetto", q, model)
+        out["progetto"] = {"label": a["choice"], "raw": a, "nuovo": a["choice"] == NESSUNO}
     out["meta"]["totale_s"] = round(time.time() - t0, 2)
     return out
 
 
 if __name__ == "__main__":
     import sys
-    # Synthetic demo data (no real emails are shipped with this repository).
+    # Dati sintetici (nessuna email reale è inclusa in questo repository).
     projects = [
-        {"slug": "acme-site", "name": "ACME website", "description": "redesign of a client's corporate website"},
-        {"slug": "infra", "name": "Infrastructure", "description": "cloud services, deployments, monitoring alerts"},
-        {"slug": "taxes", "name": "Taxes", "description": "accountant, filings, invoices"},
+        {"slug": "infrastruttura", "description": "servizi cloud, deploy, monitoraggio, avvisi dei sistemi"},
+        {"slug": "personale", "description": "posta personale non di lavoro: acquisti, viaggi, servizi"},
     ]
     emails = [
-        {"sender": "Jane Doe <jane.doe@example.com>", "subject": "Re: homepage draft", "date": "2026-09-14",
+        {"sender": "Jane Doe <jane.doe@example.com>", "subject": "Re: homepage draft",
          "body": "Hi, could you send the updated homepage draft by Thursday? We need it for the board meeting. Thanks, Jane"},
-        {"sender": "Deploy Bot <noreply@example.net>", "subject": "Deploy failed on main", "date": "2026-10-16",
+        {"sender": "Deploy Bot <noreply@example.net>", "subject": "Deploy failed on main",
          "body": "Pipeline #42 failed at step build. See logs for details."},
-        {"sender": "Newsletter <news@example.org>", "subject": "October product update", "date": "2026-10-07",
-         "body": "This month: new features, webinars and a 20% discount on annual plans. Unsubscribe here."},
     ]
     model = sys.argv[1] if len(sys.argv) > 1 else MODEL
     for e in emails:
         r = classify_email(e, projects, model)
-        print(f"\n{e['subject'][:60]}")
-        print(f"  tipo={r['tipo']['label']} ({r['tipo']['conf']:.2f})  urgenza={r['urgenza']['label']} ({r['urgenza']['score']:.2f})"
-              f"  risposta={r['serve_risposta']['p_true']:.2f}  48h={r['azione_48h']['p_true']:.2f}  rumore={r['e_rumore']['p_true']:.2f}")
-        print(f"  progetto={r['progetto']['label']} ({r['progetto']['conf']:.2f}) {json.dumps({k: round(v, 2) for k, v in r['progetto']['p'].items()})}")
-        print(f"  {r['meta']['totale_s']}s")
+        print(e["subject"][:60], {c: r[c]["label"] for c in CAMPI}, r["progetto"]["label"], f"{r['meta']['totale_s']}s")
