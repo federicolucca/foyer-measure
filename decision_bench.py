@@ -6,6 +6,7 @@ decision_bench — un sistema online sui cinque campi del paper, una domanda per
   python decision_bench.py run    labels.jsonl raw_nimble_noul.jsonl --backend nimble --formato noul --campi serve_risposta,azione_48h,e_rumore
   python decision_bench.py run    labels.jsonl raw_gemma.jsonl --backend openrouter --modello google/gemma-4-26b-a4b-it
   python decision_bench.py repeat labels.jsonl raw_jev_rep.jsonl --backend jev --n 100      # determinismo
+  python decision_bench.py run    labels.jsonl raw_jeva.jsonl --backend jeva --jeva-cache hybrid   # v2.1, local GPU, 1 worker
 Chiavi solo da variabili d'ambiente (vedi online_backends.py).
 """
 from __future__ import annotations
@@ -70,7 +71,13 @@ def main():
     ap.add_argument('--workers', type=int, default=4)
     ap.add_argument('--n', type=int, default=100)
     ap.add_argument('--seed', type=int, default=7)
+    ap.add_argument('--jeva-cache', choices=['hybrid', 'none'], default='hybrid',
+                    help='jeva only: reuse option encodings across calls (hybrid) or encode them on every call (none)')
     a = ap.parse_args()
+    if a.backend == 'jeva':
+        import jeva_backend
+        jeva_backend.configure(cache=a.jeva_cache)
+        a.workers = 1   # one model in this process, on one GPU
     righe, campi = carica(a.jsonl), a.campi.split(',')
     if a.cmd == 'repeat':
         righe = random.Random(a.seed).sample(righe, min(a.n, len(righe)))

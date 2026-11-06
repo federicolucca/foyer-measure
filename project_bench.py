@@ -7,6 +7,8 @@ quelle con un progetto etichettato; un progetto fuori elenco vale «nessuno». I
 
   python project_bench.py labels.jsonl descrizioni.md results_project.json --backend jev --variante desc
   python project_bench.py labels.jsonl descrizioni.md results_project.json --backend openrouter --modello google/gemma-4-26b-a4b-it --variante nomi
+  python project_bench.py labels.jsonl descrizioni.md results_project.json --backend jeva --variante desc        # v2.1, Table 8
+  python project_bench.py labels.jsonl descrizioni.md results_project_open.json --backend jeva --native-null    # open-set, uncalibrated
 Lezione dal paper: con descrizioni lunghe /v1/systemone fallisce in silenzio; 120 caratteri e 19 opzioni funzionano.
 """
 import argparse
@@ -42,7 +44,11 @@ def criteri(desc: dict, variante: str) -> dict:
     return c
 
 
-def chiedi(backend, modello, stato, crit):
+def chiedi(backend, modello, stato, crit, null_mode='option'):
+    if backend == 'jeva':
+        import jeva_backend
+        q = {'type': 'choice', 'instructions': so.DOMANDA['progetto'], 'criteria': crit}
+        return jeva_backend.ask_project(stato, q, so.NESSUNO, modello, null_mode)
     if backend == 'openrouter':
         prompt = (so.DOMANDA['progetto'] + ' Scegli esattamente una etichetta fra queste:\n'
                   + '\n'.join(f'- {k}: {v}' for k, v in crit.items()) + '\nRispondi SOLO con JSON: {"progetto": "<etichetta>"}')
@@ -82,10 +88,20 @@ def main():
     ap.add_argument('labels', type=Path)
     ap.add_argument('md', type=Path)
     ap.add_argument('out', type=Path)
-    ap.add_argument('--backend', choices=['jev', 'nimble', 'systemone', 'openrouter'], required=True)
+    ap.add_argument('--backend', choices=['jev', 'nimble', 'systemone', 'openrouter', 'jeva'], required=True)
     ap.add_argument('--modello', default='')
     ap.add_argument('--variante', choices=['desc', 'nomi'], default='desc')
+    ap.add_argument('--native-null', action='store_true',
+                    help="jeva only: ask with allow_null=True instead of 'nessuno' as an option (open-set, uncalibrated)")
+    ap.add_argument('--jeva-cache', choices=['hybrid', 'none'], default='hybrid',
+                    help='jeva only: reuse option encodings across calls (hybrid) or encode them on every call (none)')
     a = ap.parse_args()
+    if a.native_null and a.backend != 'jeva':
+        ap.error('--native-null applies only to --backend jeva')
+    if a.backend == 'jeva':
+        import jeva_backend
+        jeva_backend.configure(cache=a.jeva_cache)
+    null_mode = 'native' if a.native_null else 'option'
     desc = descrizioni(a.md)
     crit = criteri(desc, a.variante)
     righe = []
@@ -99,7 +115,7 @@ def main():
     for r, v in righe:
         t = time.perf_counter()
         try:
-            pred.append(chiedi(a.backend, a.modello, so.stato(r), crit))
+            pred.append(chiedi(a.backend, a.modello, so.stato(r), crit, null_mode))
             lat.append(time.perf_counter() - t)
         except Exception:
             pred.append(''); err += 1
@@ -108,6 +124,7 @@ def main():
     n_v = [i for i, v in enumerate(y) if v == so.NESSUNO]
     maj = Counter(y).most_common(1)[0]
     res = {'n': len(y), 'opzioni': len(crit), 'variante': a.variante, 'backend': a.backend, 'modello': a.modello or None,
+           'null_mode': null_mode if a.backend == 'jeva' else None,
            'maggioranza': {'classe': maj[0], 'accuracy': round(maj[1] / len(y), 4)},
            'accuracy': round(sum(p == v for p, v in zip(pred, y)) / len(y), 4), 'macro_f1': round(macro_f1(y, pred), 4),
            'nessuno': {'previsti': len(n_p), 'veri': len(n_v),

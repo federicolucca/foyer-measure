@@ -5,6 +5,7 @@ online_backends — gli stessi campi chiesti a sistemi ONLINE, con le domande de
   nimble      Bespoke Nimble     POST https://api.bespokelabs.ai/v1/systemone      $BESPOKE_API_KEY   (modello nimble-v4-max)
   systemone   qualsiasi server System One (stesso wire format di Ollama): $SYSTEMONE_URL [+ $SYSTEMONE_KEY]
   openrouter  LLM generativo in JSON mode, temperatura 0: $OPENROUTER_API_KEY, modello a scelta
+  jeva        (v2.1) Jeva-4B in-process on a local GPU, no key: see jeva_backend.py (imported only when used)
 
 Ogni backend ritorna l'etichetta nel vocabolario di systemone_email (stringa per tipo/urgenza, bool per i booleani),
 così bench_email.py e decision_bench.py li valutano con le stesse metriche. Le chiavi NON vanno nel repo:
@@ -109,7 +110,14 @@ def openrouter(state: dict, campo: str, model: str, formato: str = "choice"):
     return (label == 'sì') if campo in so.BOOLEANI else label, {"raw": obj, "usage": out.get("usage", {})}
 
 
-BACKENDS = {"jev": hosted('jev'), "nimble": hosted('nimble'), "systemone": systemone_env, "openrouter": openrouter}
+def jeva(state: dict, campo: str, model: str = "", formato: str = "choice"):
+    """Jeva-4B in-process (v2.1); torch and jeva are imported only when this backend is used."""
+    import jeva_backend
+    return jeva_backend.classify(state, campo, model, formato)
+
+
+BACKENDS = {"jev": hosted('jev'), "nimble": hosted('nimble'), "systemone": systemone_env, "openrouter": openrouter,
+            "jeva": jeva}
 
 
 def classify(backend: str, state: dict, campo: str, model: str = "", formato: str = "choice"):
