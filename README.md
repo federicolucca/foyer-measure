@@ -102,8 +102,51 @@ Notes:
 - **Cache.** `--jeva-cache hybrid` (default) reuses option encodings across calls; `none` re-encodes every option on every call. On the paper's data both give the same decisions, at about a third to a fifth of the latency with the cache.
 - One model per process: `decision_bench.py` runs Jeva with a single worker.
 
+## v2.2 — learning curve (Train After You Measure)
+
+The scripts of the follow-up paper (*Train After You Measure*): a fixed thread-grouped test set, nested training subsets, a TF-IDF baseline and LoRA fine-tunes of Tev1-0.8B and Tev1-4B at 0 (zero-shot), 50, 100, 200, 300, 400 and all labels, two seeds (7, 11), and the paper's tables, macros, hypothesis decisions and figure generated from the result files. They live in `curve/` and use the questions and definitions of `systemone_email.py` (Appendix B, Italian, verbatim), which from v2.2 also writes them in Tev1's native decision format (`decisione`, `messaggi_tev1`, `lettera`); the v2/v2.1 tools are unchanged.
+
+| File | Purpose | Origin (private foyer repo, branch `v3` @ `3d4ad13`) |
+|---|---|---|
+| `curve/curve_split.py` | `split`: fixed test set (20% of threads, stratified by the thread's type, seed 7) and nested subsets of the pool (whole threads, type-stratified order, seeds 7 and 11) → `split_paper3.json`, `curve_subsets.json` (row ids only). `examples`: the five typed examples per email in Tev1's format (contain email text; refuses to write inside the repo). | `backend/scripts/paper3/curva_dati.py` |
+| `curve/curve_baseline.py` | Entry point for the baseline on the fixed test set: word 1-2 + character 3-5 TF-IDF, balanced logistic regression, one model per field and size; majority class of the test set → `curve_baseline.json`. CPU only. | `backend/scripts/paper3/train_decision_model.py` (`--mode curva --sistema baseline`) |
+| `curve/curve_lora.py` | Kaggle kernel (private, GPU T4 ×2): installs `peft`/`transformers`, tests the flash-linear-attention kernel against the PyTorch path, runs `decision_model.py --system lora` → `curve_<model>_<seed>.json`. Edit the constants (base model, seed, sizes) per session. | `backend/scripts/paper3/kaggle/foyer_paper3_lora.py` (`ESPERIMENTO='curva'` path only) |
+| `curve/decision_model.py` | *(supporting module)* The trainer of the curve: data loading, metrics, the baseline, the LoRA (Tev1 chat template, answer = option letter, loss on the answer only, early stop on a 10% thread-grouped validation taken from the training subset, best epoch kept in memory, prediction = distribution over the option letters), one process per GPU. | `backend/scripts/paper3/train_decision_model.py` (`--mode curva` path; the per-user CV, shared and transfer modes are not included) |
+| `curve/curve_plot.py` | A 16:9 two-panel figure (type; mean of the three switches) with min/max bands across seeds → `curva.pdf`, `curva.png`. | `backend/scripts/paper3/curve_plot.py` + `curva_risultati.py` |
+| `curve/curve_tables.py` | Every number of the paper: `numbers.tex` (macros), `tab_main.tex`, `tab_hyp.tex` (the five pre-registered hypotheses decided by script), appendix tables and `fig_curve.pdf/png`. | `make_curve_table.py` of the paper's sources (setup counts now read from `split_paper3.json`) |
+
+Running (Python 3.12; the paper used scikit-learn 1.8.0, numpy 1.26.4; on Kaggle the latest `peft`/`transformers`):
+
+```bash
+pip install scikit-learn numpy matplotlib
+# 1. split: fixed test set and nested subsets (ids only)
+python curve/curve_split.py split --data labels.jsonl --out split/
+# 2. baseline on the fixed test set (CPU, about a minute)
+python curve/curve_baseline.py --user 1 --consent u1=consent_u1.json --data labels.jsonl \
+    --split split/split_paper3.json --subsets split/curve_subsets.json --out results/
+# 3. LoRA on Kaggle (T4 x2): a private dataset with curve/decision_model.py, systemone_email.py, labels.jsonl,
+#    split_paper3.json, curve_subsets.json and consenso_u1.json; kernel = curve/curve_lora.py.
+#    The same run elsewhere: python curve/decision_model.py --system lora --model tev1-4b \
+#    --base-model togethercomputer/Tev1-4B-experimental --seeds 7 --sizes 0,100,400,all --gpus 1 ... (same inputs)
+#    Copy the curve_tev1-*_<seed>.json files into results/.
+# 4. tables, macros, hypotheses and figures
+python -X utf8 curve/curve_tables.py --results results/ --split split/split_paper3.json --prereg-date 2026-11-05 \
+    --registration-m <folder with tab_lora_u1.tex and tab_baseline_u1.tex> --out generated/
+python curve/curve_plot.py --results results/ --out figure/
+```
+
+Inputs:
+- **Corpus:** the same JSONL as above (`id` integer, `thread`, `state`, `labels` with all five fields; booleans may be `true`/`false` or `sì`/`no`). Rows with `"source": "system"` (an uncorrected system decision) are not labels and are skipped.
+- **`split_paper3.json`** (ids only): `{"dati_sha256": "<sha256 of the corpus file>", "righe": N, "thread": T, "seme": 7, "frazione_test_thread": 0.2, "test_ids": [...], "pool_ids": [...], "conteggi": {"test": {"righe", "thread", "per_campo"}, "pool": {...}}}`.
+- **`curve_subsets.json`** (ids only): `{"dati_sha256": "...", "semi": {"7": {"50": [...], "100": [...], ..., "all": [...]}, "11": {...}}, "taglie_effettive": {...}, "conteggi": {...}}`; each size contains the previous one.
+- **Consent:** `{"owner": "1", "train_own": true, "updated_at": "..."}` for the person whose labels are used; without it the trainer does not start. Its sha256 is recorded in the results.
+- The runs check the corpus sha256 against the split files. The result JSON keys are in Italian (`semi`, `taglie`, `campi`, `etichette`, ...), as in the paper's runs.
+
+**No data and no weights are released:** no emails, labels, split files, per-email predictions or LoRA weights are in this repository. The LoRA weights were never saved (the best epoch is kept in memory and discarded after evaluation), and the private Kaggle dataset was deleted after each run.
+
 ## Changelog
 
+- **v2.2** (November 2026): `curve/` — learning-curve scripts of *Train After You Measure* (split, baseline, Kaggle LoRA kernel, trainer, figure, tables and hypothesis decisions); Tev1 native decision format (`decisione`, `messaggi_tev1`, `lettera`) added to `systemone_email.py`, comments translated to English.
 - **v2.1** (November 2026): `jeva_backend.py` and `--backend jeva` in `decision_bench.py` and `project_bench.py` (`--jeva-cache`, `--native-null`), for the Jeva-4B rows of paper v2.1.
 - **v2** (October 2026): the paper's questions verbatim, all five fields, hosted decision-model bench, metrics, cost threshold, project assignment and multi-annotator agreement.
 - **v1**: System One client, benchmark harness, online backends, Cohen's κ, annotator instructions.
