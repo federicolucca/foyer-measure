@@ -146,6 +146,8 @@ Inputs:
 
 ## Changelog
 
+- **v2.3** (November 2026): `revision_v2.2/` — the scripts behind paper v2.2 (arXiv v4): Holm-corrected tests, cost-chosen thresholds on the 1,500-character corpus, policy table and cost curves, repeated-CV baseline, relationship control with the paying-client definition. See `revision_v2.2/README.md`.
+
 - **v2.2** (November 2026): `curve/` — learning-curve scripts of *Train After You Measure* (split, baseline, Kaggle LoRA kernel, trainer, figure, tables and hypothesis decisions); Tev1 native decision format (`decisione`, `messaggi_tev1`, `lettera`) added to `systemone_email.py`, comments translated to English.
 - **v2.1** (November 2026): `jeva_backend.py` and `--backend jeva` in `decision_bench.py` and `project_bench.py` (`--jeva-cache`, `--native-null`), for the Jeva-4B rows of paper v2.1.
 - **v2** (October 2026): the paper's questions verbatim, all five fields, hosted decision-model bench, metrics, cost threshold, project assignment and multi-annotator agreement.
