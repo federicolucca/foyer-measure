@@ -252,8 +252,14 @@ M('BaseRareMax', f'{base_rare_max:.2f}')
 M('HFiveCases', str(cases)); M('HFiveAgainst', str(len(against)))
 M('HFiveSpamAgainst', str(sum(1 for a in against if a[3] == 'spam')))
 M('HFiveOfferAgainst', str(sum(1 for a in against if a[3] == 'offerta')))
+ft_cases = cases - sum(1 for s in SEEDS for z in SIZES if rec('base', s, z) is not None) * 2
+ft_against = sum(1 for a in against if a[0] != 'base')
+base_against = len(against) - ft_against
+M('HFiveFtCases', str(ft_cases)); M('HFiveFtAgainst', str(ft_against))
+M('HFiveBaseCases', str(cases - ft_cases)); M('HFiveBaseAgainst', str(base_against))
 hyp.append(('H5$^{c}$', 'Offer and spam F1 $<$0.3 for every trained system, seed and budget',
-            f'{len(against)} of {cases} cases $\\geq$0.3 (all fine-tunes; baseline max {base_rare_max:.2f})',
+            f'{ft_against} of {ft_cases} fine-tune cases $\\geq$0.3 ({base_against} of {cases - ft_cases} baseline cases; '
+            f'baseline max {base_rare_max:.2f})',
             'confirmed' if H5 else 'refuted'))
 outcomes = [h[3] for h in hyp]
 M('NRefuted', str(sum(o == 'refuted' for o in outcomes)))
