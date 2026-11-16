@@ -401,7 +401,7 @@ R.append(r'\bottomrule\end{tabular}\end{table}')
 MT = [r'\begin{table}[H]\centering\small',
       r'\caption{Registration M (preliminary): LoRA on the generic Qwen3.5-4B base vs.\ a word TF-IDF baseline on '
       r'\emph{type}, out-of-fold, same thread-grouped folds; $n$ = training labels per fold. Not comparable with '
-      r'Table~\ref{tab:main} (cross-validation, not the fixed test). Rows from the draft\textquotesingle s generated table.}',
+      r'Table~\ref{tab:main} (cross-validation, not the fixed test). Generated from the run\textquotesingle s \texttt{metrics.json}.}',
       r'\label{tab:m}', r'\begin{tabular}{llcccc}\toprule',
       r'$n$ & system & acc. & macro-F1 & ECE & ms/email \\\midrule']
 for r in mrows:
