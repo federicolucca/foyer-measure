@@ -2,8 +2,10 @@
 
 The scripts of the pre-registered learning curve in *Train After You Measure: a Pre-Registered Learning Curve for
 Fine-Tuning Typed Decision Models on One User's Labels* (companion to arXiv:2610.32955). The paper cites code tag
-`v2.2`. These six files are the ones at that tag. This README was added on `main` right after the tag, and the same
-information is in the top-level README of the tag (section "v2.2").
+`v2.4`. The six files were first released at tag `v2.2`. At `v2.4`, `curve_tables.py` writes the current caption of the
+registration M table (Table 6), so its output is byte-identical to the paper's tables. The two pre-registrations of
+the paper are in `prereg/` (see `prereg/README.md`). The top-level README has the same information (section "v2.2" and
+the changelog).
 
 **No data are released:** no emails, labels, split files, per-row predictions or result JSON files. **No weights are
 released either:** the LoRA adapters were never saved. Neither are the owner's project descriptions.
