@@ -4,6 +4,8 @@ Code and protocol accompanying the preprint
 
 > F. Lucca, *Measure Before You Train: Typed Decision Models vs. a Classical Baseline vs. a Generative LLM for Routing a Personal Multilingual Inbox*, arXiv:2610.32955 (v2, October 2026; paper v2.1, November 2026, adds Jeva-4B as the eleventh system — code tag `v2.1`).
 
+Project page: <https://federicolucca.github.io/foyer-measure/> (source in `docs/`).
+
 The paper measures how well different systems — production keyword rules, a TF-IDF + logistic-regression baseline, local and hosted typed decision models (Tev1, Nimble, Jeva, Jev) and hosted generative LLMs — make the routing decisions of a personal email agent: message type, urgency, and three switches (needs-reply, action-48h, is-noise). This repository contains everything needed to run the same measurement on **your own** inbox. **No emails, labels or per-email results are included: the data in the paper are the author's private correspondence and are not released.**
 
 ## What is here
